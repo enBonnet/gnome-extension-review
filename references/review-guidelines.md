@@ -66,6 +66,9 @@ process (`prefs.js` and its modules). They conflict with `Gtk`/`Adw`.
 Extensions that modify, reload, or interact with other extensions or the
 extension system are generally discouraged; reviewed case-by-case and may be
 rejected.
+*Detection hints: importing `ui/extensionSystem.js` or
+`ui/extensionDownloader.js` (`resource:///org/gnome/shell/ui/extensionSystem.js`),
+poking `Main.extensionManager`, enabling/disabling other extensions' uuids.*
 
 ### R9 🔴 No obfuscated code
 Code **MUST** be readable, reviewable JavaScript — never minified or obfuscated.
@@ -271,6 +274,40 @@ them (severity there: error).
   are no longer emitted. (EGO-C50-001)
 - **C50-2 🔴** `RunDialog._restart()` is removed (X11 support dropped). (EGO-C50-002)
 
+### C51 — GNOME Shell 51 removals and behavior changes
+([porting guide](https://gjs.guide/extensions/upgrading/gnome-shell-51.html);
+Shexli ids for these rules were not yet published when curated — verify on
+upload)
+- **C51-1 🔴** `async disable()` now **throws** — Shell never supported async
+  disable, and 51 turns it into an error. Make `disable()` synchronous.
+- **C51-2 🔴** The `vertical` property of St widgets is removed (deprecated in
+  48). Use the widget's layout/orientation properties instead (e.g.
+  `St.BoxLayout({orientation: Clutter.Orientation.VERTICAL})`).
+- **C51-3 🔴** `ui/pointerWatcher.js` is removed. Use
+  `global.backend.get_cursor_tracker()` to get the `Meta.CursorTracker`.
+- **C51-4 🔴** `Shell.GLSLEffect` is removed. Use `Clutter.ShaderEffect`;
+  `vfunc_build_pipeline()` logic moves to `vfunc_get_static_snippet()`
+  returning a `Cogl.Snippet`.
+- **C51-5 🔴** `Clutter.get_default_backend()` is removed. Use
+  `global.stage.context.get_backend()` or `actor.get_context().get_backend()`.
+- **C51-6 🔴** `CalendarMessageList.maybeCollapseMessageGroupForEvent()` is
+  removed from `ui/calendar.js`.
+- **C51-7 🔴** `Gio.DBus.makeProxyWrapper()` now returns a `Gio.DBusProxy`
+  subclass instead of a factory function — code that invokes the result
+  without `new` breaks; use `new`.
+
+Deprecated in 51 (🟡 note in reviews, not yet removed): direct actor
+event-signal connections (`'key-press-event'`, `'button-press-event'`, …) in
+favor of Clutter event controllers (`Clutter.KeyController`,
+`Clutter.ClickGesture`, `Clutter.ScrollController`, …); `St.ButtonMask.ONE/
+TWO/THREE` renamed to `PRIMARY/MIDDLE/SECONDARY`; `PopupMenu.open()/close()`
+accept a parameters object (`{animate: false}`) instead of a single animation
+argument.
+
+**GNOME 52:** no porting guide was published as of 2026-09 — re-check
+`https://gjs.guide/extensions/upgrading/gnome-shell-52.html` before reviewing
+code that claims 52, and add C52 rules here when it exists.
+
 ## Appendix — Shexli (EGO static analyzer) cross-reference
 
 EGO runs [Shexli](https://gitlab.gnome.org/Infrastructure/extensions-web)
@@ -306,6 +343,7 @@ what submitters see on extensions.gnome.org review pages.
 | R35 | EGO037 | — | Soup.Session abort |
 | C49-1…5 | EGO-C49-001…005 | — | GNOME 49 removals |
 | C50-1…2 | EGO-C50-001…002 | — | GNOME 50 removals |
+| C51-1…7 | — (not yet published) | — | GNOME 51 removals/behavior changes |
 
 Shexli is AGPL-3.0; this skill implements its *rule semantics* only, sourced
 from the MIT-licensed gjs.guide pages and public EGO review output. No Shexli

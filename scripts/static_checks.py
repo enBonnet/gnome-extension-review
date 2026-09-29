@@ -12,9 +12,17 @@ Exit codes: 0 = no blocking candidates, 1 = blocking candidates found,
 
 Scope: official EGO review guidelines + gjs.guide best practices (see
 references/ in this skill). Rules referenced below are R1-R35 plus the
-version-compatibility rules C49-*/C50*. Rule semantics are cross-referenced
-with EGO's Shexli static analyzer (EGO001-EGO037, EGO-C49-*, EGO-C50-*); see
-references/review-guidelines.md for the mapping table.
+version-compatibility rules C49-*/C50-*/C51-*. Rule semantics are
+cross-referenced with EGO's Shexli static analyzer (EGO001-EGO037,
+EGO-C49-*, EGO-C50-*); see references/review-guidelines.md for the mapping
+table.
+
+Modes:
+    static_checks.py <extension-dir>   scan an extension source tree
+    static_checks.py <bundle>.zip      validate a built EGO bundle (release
+                                       packaging: required files at root,
+                                       no compiled schemas, no .po/.pot,
+                                       no binaries)
 """
 
 import argparse
@@ -23,6 +31,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 
 JS_EXTS = (".js", ".mjs")
 SKIP_DIRS = {"node_modules", ".git", "locale", "build", "dist",
@@ -99,6 +108,18 @@ RE_DISPLAY_RESTART_SIGNAL = re.compile(
     r"global\.display\.(?:connect|disconnect|emit)\s*\(\s*['\"]"
     r"(?:restart|show-restart-message)['\"]")
 RE_RUN_DIALOG_RESTART = re.compile(r"\._restart\s*\(")
+# GNOME 51 removals/behavior changes (C51-*)
+RE_ASYNC_DISABLE = re.compile(r"\basync\s+disable\s*\(")
+RE_ST_VERTICAL = re.compile(r"\.vertical\s*=|\bvertical\s*:")
+RE_POINTER_WATCHER = re.compile(r"\bpointerWatcher\b|\bgetPointerWatcher\s*\(|"
+                                r"ui/pointerWatcher")
+RE_GLSL_EFFECT = re.compile(r"\bGLSLEffect\b")
+RE_CLUTTER_DEFAULT_BACKEND = re.compile(r"Clutter\.get_default_backend\s*\(")
+RE_CALENDAR_COLLAPSE = re.compile(r"\bmaybeCollapseMessageGroupForEvent\b")
+RE_PROXY_WRAPPER = re.compile(r"Gio\.DBus\.makeProxyWrapper\s*\(")
+# R8: interfering with the extension system
+RE_EXTENSION_SYSTEM = re.compile(
+    r"ui/extension(?:System|Downloader)|\bMain\.extensionManager\b")
 # R18/EGO-M-008: unlock-dialog disable() comment placement
 RE_DISABLE_DEF = re.compile(r"(?<![\w.$])disable\s*\(\s*\)\s*\{")
 
@@ -283,6 +304,10 @@ def scan_js_file(root, rel, context, findings, hints, targets=None):
         if RE_IMPORTS_GI.search(ln):
             add("warning", "R30", i, "imports._gi used directly — use supported APIs such as "
                 "InjectionManager (EGO031)")
+        if RE_EXTENSION_SYSTEM.search(ln):
+            add("warning", "R8", i, "extension-system internals used (extensionSystem/"
+                "extensionDownloader/Main.extensionManager) — interfering with other extensions "
+                "or the extension system is case-by-case and may be rejected")
         if context in ("prefs", "shared") and RE_GET_PREFS_WIDGET.search(ln):
             add("warning", "R31", i, "getPreferencesWidget() in 45+ prefs — use fillPreferencesWindow() "
                 "(EGO032/EGO-C45-001)")
@@ -330,6 +355,29 @@ def scan_js_file(root, rel, context, findings, hints, targets=None):
                         "in GNOME 50 (EGO-C50-001)")
                 if RE_RUN_DIALOG_RESTART.search(ln):
                     add("blocker", "C50-2", i, "RunDialog._restart() removed in GNOME 50 (EGO-C50-002)")
+            if 51 in targets:
+                if RE_ASYNC_DISABLE.search(ln):
+                    add("blocker", "C51-1", i, "async disable() throws in GNOME 51 — disable() must be "
+                        "synchronous")
+                if RE_ST_VERTICAL.search(ln) and context != "prefs":
+                    add("blocker", "C51-2", i, "St widget `vertical` property removed in GNOME 51 — use "
+                        "the layout/orientation properties "
+                        "(e.g. St.BoxLayout orientation: Clutter.Orientation.VERTICAL)")
+                if RE_POINTER_WATCHER.search(ln):
+                    add("blocker", "C51-3", i, "ui/pointerWatcher.js removed in GNOME 51 — use "
+                        "global.backend.get_cursor_tracker() (Meta.CursorTracker)")
+                if RE_GLSL_EFFECT.search(ln):
+                    add("blocker", "C51-4", i, "Shell.GLSLEffect removed in GNOME 51 — use "
+                        "Clutter.ShaderEffect / vfunc_get_static_snippet()")
+                if RE_CLUTTER_DEFAULT_BACKEND.search(ln):
+                    add("blocker", "C51-5", i, "Clutter.get_default_backend() removed in GNOME 51 — use "
+                        "global.stage.context.get_backend() or actor.get_context().get_backend()")
+                if RE_CALENDAR_COLLAPSE.search(ln):
+                    add("blocker", "C51-6", i, "CalendarMessageList.maybeCollapseMessageGroupForEvent() "
+                        "removed in GNOME 51 (ui/calendar.js)")
+                if RE_PROXY_WRAPPER.search(ln):
+                    add("warning", "C51-7", i, "Gio.DBus.makeProxyWrapper() returns a Gio.DBusProxy "
+                        "subclass in GNOME 51 — the result must be invoked with `new`")
 
     if RE_INJECT.search(text) and not RE_INJECT_CLEAR.search(text):
         add("warning", "lifecycle", 0, "InjectionManager.overrideMethod without restoreMethod/clear in this file")
@@ -390,7 +438,7 @@ def check_metadata(root, findings, meta=None):
         m = re.match(r"^(\d+)", str(v))
         if m and int(m.group(1)) < 45:
             findings.append(Finding("info", "scope", f"shell-version '{v}' predates GNOME 45 (out of this review's scope)"))
-        elif m and int(m.group(1)) > 51:
+        elif m and int(m.group(1)) > 52:
             findings.append(Finding("info", "R17", f"shell-version '{v}' looks like a future release — "
                                     "EGO forbids claiming unreleased versions (verify against current GNOME schedule)"))
     if isinstance(sv, list):
@@ -556,11 +604,82 @@ def check_misc_files(root, other_files, findings):
             findings.append(Finding("info", "R25", f"unexpected file in locale/: {rel}"))
 
 
+ZIP_JUNK_DIRS = (".git/", "__pycache__/", "node_modules/")
+VERSION_NAME_RE = re.compile(r"^(?!^[. ]+$)[a-zA-Z0-9 .]{1,16}$")
+
+
+def check_zip(zip_path, findings):
+    """Validate a built EGO bundle (release-guide.md §2/§3): required files at
+    the zip root, no forbidden artifacts, sane metadata."""
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except (OSError, zipfile.BadZipFile) as e:
+        findings.append(Finding("blocker", "R15", f"zip unreadable: {e}"))
+        return
+
+    with zf:
+        names = [i.filename for i in zf.infolist() if not i.filename.endswith("/")]
+
+        # Required files must sit at the zip ROOT (not nested in a folder).
+        for req in ("metadata.json", "extension.js"):
+            if req not in names:
+                findings.append(Finding("blocker", "R15", f"'{req}' missing from the bundle root"))
+        top = {n.split("/", 1)[0] for n in names}
+        if len(top) == 1 and all(n.startswith(next(iter(top)) + "/") for n in names):
+            findings.append(Finding("blocker", "R25",
+                            f"bundle is wrapped in a single directory '{next(iter(top))}/' — "
+                            "files must sit at the zip root (a nested directory will not install)"))
+
+        for name in names:
+            low = name.lower()
+            if low.endswith("gschemas.compiled"):
+                findings.append(Finding("blocker", "R25", f"compiled schema shipped: {name} — "
+                                        "EGO compiles schemas when serving the download; ship only "
+                                        "the XML (EGO-P-006)"))
+            elif low.endswith((".po", ".pot")):
+                findings.append(Finding("info", "R25", f"translation source shipped: {name} "
+                                        "(compile with `pack --podir` / msgfmt; ship .mo only)"))
+            elif os.path.splitext(name)[1].lower() in BIN_EXTS:
+                findings.append(Finding("blocker", "R12", f"binary file included: {name}"))
+            elif low.endswith(".sh"):
+                findings.append(Finding("info", "R25", f"script shipped: {name} — build/install "
+                                        "scripts are unnecessary files"))
+            if any(j in "/" + name for j in ZIP_JUNK_DIRS):
+                findings.append(Finding("warning", "R25", f"build/VCS junk shipped: {name}"))
+
+        if "metadata.json" in names:
+            try:
+                meta = json.loads(zf.read("metadata.json").decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as e:
+                findings.append(Finding("blocker", "R17", f"bundled metadata.json does not parse: {e}"))
+                return
+            if not meta.get("uuid") or not UUID_RE.match(str(meta.get("uuid", ""))):
+                findings.append(Finding("blocker", "R17", "bundled metadata uuid missing/malformed"))
+            if not meta.get("shell-version"):
+                findings.append(Finding("blocker", "R17", "bundled metadata shell-version missing/empty"))
+            if "version" in meta:
+                findings.append(Finding("info", "R17", "bundled metadata sets 'version' — the EGO "
+                                        "upload counter overrides it; developers should not set it"))
+            vn = meta.get("version-name")
+            if vn is not None and not isinstance(vn, str):
+                findings.append(Finding("warning", "R17", "version-name must be a string"))
+            elif isinstance(vn, str) and not VERSION_NAME_RE.match(vn):
+                findings.append(Finding("warning", "R17", f"version-name '{vn}' does not match the "
+                                        "allowed format ^(?!^[. ]+$)[a-zA-Z0-9 .]{1,16}$"))
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("path", help="extension directory")
+    ap.add_argument("path", help="extension directory or built .zip bundle")
     ap.add_argument("--json", action="store_true", help="JSON output")
     args = ap.parse_args(argv)
+
+    if args.path.lower().endswith(".zip"):
+        findings = []
+        check_zip(args.path, findings)
+        findings.sort(key=lambda f: (SEV_ORDER[f.severity], f.rule, f.file or ""))
+        _print_findings(args.path, findings, contexts=None, hints=None, as_json=args.json)
+        return 1 if any(f.severity == "blocker" for f in findings) else 0
 
     root = args.path
     if not os.path.isdir(root):
@@ -572,6 +691,10 @@ def main(argv):
 
     meta = load_metadata(root)
     targets = shell_targets(meta)
+    if 52 in targets:
+        findings.append(Finding("info", "C52", "shell-version claims GNOME 52 — no porting guide was "
+                                "published when this skill was curated; verify APIs against the live "
+                                "gnome-shell source (references/shell-ui-map.md)"))
 
     if not js_files:
         findings.append(Finding("blocker", "R15", f"no JavaScript files found under {root}"))
@@ -603,39 +726,45 @@ def main(argv):
                                     "(R13/EGO-A-005)"))
 
     findings.sort(key=lambda f: (SEV_ORDER[f.severity], f.rule, f.file or "", f.line or 0))
+    _print_findings(root, findings, contexts, hints, as_json=args.json)
 
-    if args.json:
+    return 1 if any(f.severity == "blocker" for f in findings) else 0
+
+
+def _print_findings(path, findings, contexts=None, hints=None, as_json=False):
+    if as_json:
         print(json.dumps({
-            "path": root,
+            "path": path,
             "contexts": contexts,
             "findings": [f.as_dict() for f in findings],
             "lifecycle_hints": hints,
         }, indent=2))
-    else:
-        print(f"Extension: {root}")
-        print(f"Modules: {len(js_files)} (contexts: prefs={sum(1 for c in contexts.values() if c == 'prefs')}, "
+        return
+    if contexts is not None:
+        print(f"Extension: {path}")
+        print(f"Modules: {len(contexts)} (contexts: prefs={sum(1 for c in contexts.values() if c == 'prefs')}, "
               f"shared={sum(1 for c in contexts.values() if c == 'shared')}, "
               f"shell={sum(1 for c in contexts.values() if c == 'shell')})")
+    else:
+        print(f"Bundle: {path}")
+    print()
+    for sev, label in (("blocker", "BLOCKING CANDIDATES (verify)"),
+                       ("warning", "WARNINGS (verify)"),
+                       ("info", "INFO")):
+        fs = [f for f in findings if f.severity == sev]
+        print(f"== {label}: {len(fs)}")
+        for f in fs:
+            loc = f"{f.file}:{f.line}" if f.file else os.path.basename(path)
+            print(f"  [{f.rule}] {loc}")
+            print(f"      {f.message}")
         print()
-        for sev, label in (("blocker", "BLOCKING CANDIDATES (verify)"),
-                           ("warning", "WARNINGS (verify)"),
-                           ("info", "INFO")):
-            fs = [f for f in findings if f.severity == sev]
-            print(f"== {label}: {len(fs)}")
-            for f in fs:
-                loc = f"{f.file}:{f.line}" if f.file else f.file
-                print(f"  [{f.rule}] {loc}")
-                print(f"      {f.message}")
-            print()
-        if hints:
-            print("== LIFECYCLE AUDIT HINTS (creation sites found)")
-            for name, locs in sorted(hints.items()):
-                print(f"  {name}: {', '.join(locs)}")
-            print()
-        print("NOTE: these are heuristic candidates. Verify each in context and")
-        print("complete the manual lifecycle audit (references/lifecycle-audit.md).")
-
-    return 1 if any(f.severity == "blocker" for f in findings) else 0
+    if hints:
+        print("== LIFECYCLE AUDIT HINTS (creation sites found)")
+        for name, locs in sorted(hints.items()):
+            print(f"  {name}: {', '.join(locs)}")
+        print()
+    print("NOTE: these are heuristic candidates. Verify each in context and")
+    print("complete the manual lifecycle audit (references/lifecycle-audit.md).")
 
 
 if __name__ == "__main__":
